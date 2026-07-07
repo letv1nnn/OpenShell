@@ -1647,6 +1647,11 @@ fn spawn_create_provider(app: &App, tx: mpsc::UnboundedSender<Event>) {
     };
     let credentials = form.discovered_credentials.clone().unwrap_or_default();
     let workspace = app.current_workspace.clone();
+    let config: HashMap<String, String> = form
+        .config
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 
     tokio::spawn(async move {
         // Try with the chosen name, retry with suffix on collision.
@@ -1671,7 +1676,7 @@ fn spawn_create_provider(app: &App, tx: mpsc::UnboundedSender<Event>) {
                     }),
                     r#type: ptype.clone(),
                     credentials: credentials.clone(),
-                    config: HashMap::default(),
+                    config: config.clone(),
                     credential_expires_at_ms: HashMap::default(),
                     profile_workspace: workspace.clone(),
                 }),

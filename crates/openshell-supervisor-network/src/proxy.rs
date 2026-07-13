@@ -610,7 +610,8 @@ async fn handle_tcp_connection(
         .await;
     }
 
-    let (host, port) = parse_target(target)?;
+    let (raw_host, port) = parse_target(target)?;
+    let host = normalize_connect_host(&raw_host);
     let host_lc = host.to_ascii_lowercase();
 
     if host_lc == INFERENCE_LOCAL_HOST && port == INFERENCE_LOCAL_PORT {
@@ -781,8 +782,10 @@ async fn handle_tcp_connection(
         // user code runs). Bypass the normal SSRF tiers so link-local gateway
         // addresses (used by rootless Podman with pasta) are not hard-blocked.
         // Cloud metadata IPs and control-plane ports are still rejected.
-        match resolve_and_check_trusted_gateway(&host, port, gw, sandbox_entrypoint_pid).await {
-            Ok(addrs) => addrs,
+        match resolve_and_check_trusted_gateway(&raw_host, port, gw, sandbox_entrypoint_pid).await {
+            Ok(addrs) => TcpStream::connect(addrs.as_slice())
+                .await
+                .into_diagnostic()?,
             Err(reason) => {
                 {
                     let event = NetworkActivityBuilder::new(openshell_ocsf::ctx::ctx())
@@ -833,7 +836,7 @@ async fn handle_tcp_connection(
         // Loopback and link-local are still always blocked.
         match parse_allowed_ips(&raw_allowed_ips) {
             Ok(nets) => {
-                match resolve_and_check_allowed_ips(&host, port, &nets, sandbox_entrypoint_pid)
+                match resolve_and_check_allowed_ips(&raw_host, port, &nets, sandbox_entrypoint_pid)
                     .await
                 {
                     Ok(addrs) => addrs,
@@ -4542,6 +4545,10 @@ fn parse_target(target: &str) -> Result<(String, u16)> {
     Ok((host.to_string(), port))
 }
 
+fn normalize_connect_host(raw_host: &str) -> &str {
+    raw_host.strip_suffix('.').unwrap_or(raw_host)
+}
+
 async fn respond(client: &mut TcpStream, bytes: &[u8]) -> Result<()> {
     client.write_all(bytes).await.into_diagnostic()?;
     Ok(())
@@ -7455,6 +7462,14 @@ network_policies:
     }
 
     #[test]
+    fn test_normalize_connect_host_strips_single_trailing_dot() {
+        assert_eq!(
+            normalize_connect_host("api.example.com."),
+            "api.example.com"
+        );
+    }
+
+    #[test]
     fn test_parse_target_control_char_passes_through() {
         let (host, _) = parse_target("evil\x01.com:443").unwrap();
         assert!(
@@ -7609,6 +7624,11 @@ network_policies:
             254,
             "hostname exceeding DNS 253-char limit not rejected"
         );
+    }
+
+    #[test]
+    fn test_normalize_connect_host_remains_the_same() {
+        assert_eq!(normalize_connect_host("api.example.com"), "api.example.com");
     }
 
     // --- rewrite_forward_request tests ---

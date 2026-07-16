@@ -1287,6 +1287,7 @@ pub(super) async fn handle_exec_sandbox_interactive(
     let timeout_seconds = req.timeout_seconds;
     let cols = if req.cols == 0 { 80 } else { req.cols };
     let rows = if req.rows == 0 { 24 } else { req.rows };
+    let tty = req.tty;
 
     let sandbox_id = sandbox.object_id().to_string();
 
@@ -1314,6 +1315,7 @@ pub(super) async fn handle_exec_sandbox_interactive(
             timeout_seconds,
             cols,
             rows,
+            tty,
         )
         .await
         {
@@ -1634,6 +1636,7 @@ async fn stream_interactive_exec_over_relay(
     timeout_seconds: u32,
     cols: u32,
     rows: u32,
+    tty: bool,
 ) -> Result<(), Status> {
     let command_preview: String = command
         .chars()
@@ -1658,6 +1661,7 @@ async fn stream_interactive_exec_over_relay(
         input_stream,
         cols,
         rows,
+        tty,
         tx.clone(),
     );
 
@@ -1709,6 +1713,7 @@ async fn run_interactive_exec_with_russh(
     mut input_stream: tonic::Streaming<ExecSandboxInput>,
     cols: u32,
     rows: u32,
+    tty: bool,
     tx: mpsc::Sender<Result<ExecSandboxEvent, Status>>,
 ) -> Result<i32, Status> {
     use openshell_core::proto::exec_sandbox_input::Payload;
@@ -1752,10 +1757,12 @@ async fn run_interactive_exec_with_russh(
         .await
         .map_err(|e| Status::internal(format!("failed to open ssh channel: {e}")))?;
 
-    channel
-        .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
-        .await
-        .map_err(|e| Status::internal(format!("failed to allocate PTY: {e}")))?;
+    if tty {
+        channel
+            .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
+            .await
+            .map_err(|e| Status::internal(format!("failed to allocate PTY: {e}")))?;
+    }
 
     channel
         .exec(true, command.as_bytes())
@@ -1773,9 +1780,11 @@ async fn run_interactive_exec_with_russh(
                     }
                 }
                 Some(Payload::Resize(resize)) => {
-                    let _ = write_half
-                        .window_change(resize.cols, resize.rows, 0, 0)
-                        .await;
+                    if tty {
+                        let _ = write_half
+                            .window_change(resize.cols, resize.rows, 0, 0)
+                            .await;
+                    }
                 }
                 Some(Payload::Start(_)) | None => {}
             }

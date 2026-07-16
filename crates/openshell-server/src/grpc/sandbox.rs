@@ -2627,6 +2627,21 @@ mod tests {
     }
 
     #[test]
+    fn interactive_exec_accepts_tty_false() {
+        use openshell_core::proto::exec_sandbox_input;
+        let msg = ExecSandboxInput {
+            payload: Some(exec_sandbox_input::Payload::Start(ExecSandboxRequest {
+                sandbox_id: "test-id".to_string(),
+                command: vec!["bash".to_string()],
+                tty: false,
+                ..Default::default()
+            })),
+        };
+        let req = validate_interactive_exec_start(Some(msg)).unwrap();
+        assert!(!req.tty);
+    }
+
+    #[test]
     fn interactive_exec_accepts_valid_start() {
         use openshell_core::proto::exec_sandbox_input;
         let msg = ExecSandboxInput {

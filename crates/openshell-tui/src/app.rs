@@ -349,6 +349,8 @@ pub enum ProviderKeyField {
     EnvVarName,
     /// Custom env var value (generic / no-known-env-vars types only).
     GenericValue,
+    /// Browsing/deleting existing config entries (Up/Down/Ctrl+D).
+    ConfigList,
     /// Config key name input.
     ConfigKeyName,
     /// Config key value input.
@@ -524,6 +526,7 @@ pub struct UpdateProviderForm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateProviderField {
     CredentialValue,
+    ConfigEntry,
     ConfigKey,
     ConfigValue,
     Submit,
@@ -2450,7 +2453,7 @@ impl App {
                 }
                 KeyCode::Tab => {
                     if form.is_generic {
-                        // Name → EnvVarName → GenericValue → ConfigKeyName → ConfigKeyValue → Submit → Name
+                        // Name → EnvVarName → GenericValue → ConfigList → ConfigKeyName → ConfigKeyValue → Submit → Name
                         match form.key_field {
                             ProviderKeyField::Name => {
                                 form.key_field = ProviderKeyField::EnvVarName;
@@ -2459,6 +2462,13 @@ impl App {
                                 form.key_field = ProviderKeyField::GenericValue;
                             }
                             ProviderKeyField::GenericValue => {
+                                if form.config.is_empty() {
+                                    form.key_field = ProviderKeyField::ConfigKeyName;
+                                } else {
+                                    form.key_field = ProviderKeyField::ConfigList;
+                                }
+                            }
+                            ProviderKeyField::ConfigList => {
                                 form.key_field = ProviderKeyField::ConfigKeyName;
                             }
                             ProviderKeyField::ConfigKeyName => {
@@ -2488,11 +2498,15 @@ impl App {
                             }
                         }
                     } else {
-                        // Name → Credential[0..N-1] → ConfigKeyName → ConfigKeyValue → Submit → Name
+                        // Name → Credential[0..N-1] → [ConfigList →] ConfigKeyName → ConfigKeyValue → Submit → Name
                         match form.key_field {
                             ProviderKeyField::Name => {
                                 if form.credentials.is_empty() {
-                                    form.key_field = ProviderKeyField::ConfigKeyName;
+                                    if form.config.is_empty() {
+                                        form.key_field = ProviderKeyField::ConfigKeyName;
+                                    } else {
+                                        form.key_field = ProviderKeyField::ConfigList;
+                                    }
                                 } else {
                                     form.key_field = ProviderKeyField::Credential;
                                     form.cred_cursor = 0;
@@ -2501,9 +2515,14 @@ impl App {
                             ProviderKeyField::Credential => {
                                 if form.cred_cursor < form.credentials.len().saturating_sub(1) {
                                     form.cred_cursor += 1;
+                                } else if !form.config.is_empty() {
+                                    form.key_field = ProviderKeyField::ConfigList;
                                 } else {
                                     form.key_field = ProviderKeyField::ConfigKeyName;
                                 }
+                            }
+                            ProviderKeyField::ConfigList => {
+                                form.key_field = ProviderKeyField::ConfigKeyName;
                             }
                             ProviderKeyField::ConfigKeyName => {
                                 form.key_field = ProviderKeyField::ConfigKeyValue;
@@ -2538,7 +2557,14 @@ impl App {
                         form.key_field = match form.key_field {
                             ProviderKeyField::EnvVarName => ProviderKeyField::Name,
                             ProviderKeyField::GenericValue => ProviderKeyField::EnvVarName,
-                            ProviderKeyField::ConfigKeyName => ProviderKeyField::GenericValue,
+                            ProviderKeyField::ConfigList => ProviderKeyField::GenericValue,
+                            ProviderKeyField::ConfigKeyName => {
+                                if form.config.is_empty() {
+                                    ProviderKeyField::GenericValue
+                                } else {
+                                    ProviderKeyField::ConfigList
+                                }
+                            }
                             ProviderKeyField::ConfigKeyValue => ProviderKeyField::ConfigKeyName,
                             ProviderKeyField::Submit => ProviderKeyField::ConfigKeyValue,
                             _ => ProviderKeyField::Submit,
@@ -2552,16 +2578,26 @@ impl App {
                                     form.key_field = ProviderKeyField::Name;
                                 }
                             }
-                            ProviderKeyField::ConfigKeyValue => {
-                                form.key_field = ProviderKeyField::ConfigKeyName;
-                            }
-                            ProviderKeyField::ConfigKeyName => {
+                            ProviderKeyField::ConfigList => {
                                 if form.credentials.is_empty() {
                                     form.key_field = ProviderKeyField::Name;
                                 } else {
                                     form.key_field = ProviderKeyField::Credential;
                                     form.cred_cursor = form.credentials.len().saturating_sub(1);
                                 }
+                            }
+                            ProviderKeyField::ConfigKeyName => {
+                                if !form.config.is_empty() {
+                                    form.key_field = ProviderKeyField::ConfigList;
+                                } else if form.credentials.is_empty() {
+                                    form.key_field = ProviderKeyField::Name;
+                                } else {
+                                    form.key_field = ProviderKeyField::Credential;
+                                    form.cred_cursor = form.credentials.len().saturating_sub(1);
+                                }
+                            }
+                            ProviderKeyField::ConfigKeyValue => {
+                                form.key_field = ProviderKeyField::ConfigKeyName;
                             }
                             ProviderKeyField::Submit => {
                                 form.key_field = ProviderKeyField::ConfigKeyValue;
@@ -2579,6 +2615,33 @@ impl App {
                             Self::handle_text_input(value, key);
                         }
                     }
+                    ProviderKeyField::ConfigList => match key.code {
+                        KeyCode::Up => {
+                            form.config_cursor = form.config_cursor.saturating_sub(1);
+                        }
+                        KeyCode::Down if !form.config.is_empty() => {
+                            form.config_cursor =
+                                (form.config_cursor + 1).min(form.config.len() - 1);
+                        }
+                        KeyCode::Char('d')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !form.config.is_empty() =>
+                        {
+                            let key_to_remove = form
+                                .config
+                                .keys()
+                                .nth(form.config_cursor)
+                                .cloned()
+                                .unwrap_or_default();
+                            form.config.shift_remove(&key_to_remove);
+                            form.config_cursor =
+                                form.config_cursor.min(form.config.len().saturating_sub(1));
+                            if form.config.is_empty() {
+                                form.key_field = ProviderKeyField::ConfigKeyName;
+                            }
+                        }
+                        _ => {}
+                    },
                     ProviderKeyField::ConfigKeyName => match key.code {
                         KeyCode::Enter => {
                             flush_config_input(
@@ -2586,28 +2649,6 @@ impl App {
                                 &mut form.config_key_input,
                                 &mut form.config_value_input,
                             );
-                        }
-                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if !form.config.is_empty() {
-                                let key_to_remove = form
-                                    .config
-                                    .keys()
-                                    .nth(form.config_cursor)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                form.config.shift_remove(&key_to_remove);
-                                form.config_cursor =
-                                    form.config_cursor.min(form.config.len().saturating_sub(1));
-                            }
-                        }
-                        KeyCode::Up => {
-                            form.config_cursor = form.config_cursor.saturating_sub(1);
-                        }
-                        KeyCode::Down => {
-                            if !form.config.is_empty() {
-                                form.config_cursor =
-                                    (form.config_cursor + 1).min(form.config.len() - 1);
-                            }
                         }
                         _ => {
                             Self::handle_text_input(&mut form.config_key_input, key);
@@ -2640,6 +2681,15 @@ impl App {
                                 &mut form.config_key_input,
                                 &mut form.config_value_input,
                             );
+                            if !form.config_key_input.is_empty()
+                                || !form.config_value_input.is_empty()
+                            {
+                                form.status = Some(
+                                    "Both key and value are required to add config entry."
+                                        .to_string(),
+                                );
+                                return;
+                            }
                             // Validate and build credentials map.
                             let mut creds = HashMap::new();
                             if form.is_generic {
@@ -2803,6 +2853,13 @@ impl App {
             }
             KeyCode::Tab => match form.focus {
                 UpdateProviderField::CredentialValue => {
+                    if form.config.is_empty() {
+                        form.focus = UpdateProviderField::ConfigKey;
+                    } else {
+                        form.focus = UpdateProviderField::ConfigEntry;
+                    }
+                }
+                UpdateProviderField::ConfigEntry => {
                     form.focus = UpdateProviderField::ConfigKey;
                 }
                 UpdateProviderField::ConfigKey => {
@@ -2832,8 +2889,15 @@ impl App {
                 UpdateProviderField::CredentialValue => {
                     form.focus = UpdateProviderField::Submit;
                 }
-                UpdateProviderField::ConfigKey => {
+                UpdateProviderField::ConfigEntry => {
                     form.focus = UpdateProviderField::CredentialValue;
+                }
+                UpdateProviderField::ConfigKey => {
+                    if form.config.is_empty() {
+                        form.focus = UpdateProviderField::CredentialValue;
+                    } else {
+                        form.focus = UpdateProviderField::ConfigEntry;
+                    }
                 }
                 UpdateProviderField::ConfigValue => {
                     form.focus = UpdateProviderField::ConfigKey;
@@ -2846,6 +2910,33 @@ impl App {
                 UpdateProviderField::CredentialValue => {
                     Self::handle_text_input(&mut form.new_value, key);
                 }
+                UpdateProviderField::ConfigEntry => match key.code {
+                    KeyCode::Up => {
+                        form.config_cursor = form.config_cursor.saturating_sub(1);
+                    }
+                    KeyCode::Down if !form.config.is_empty() => {
+                        form.config_cursor = (form.config_cursor + 1).min(form.config.len() - 1);
+                    }
+                    KeyCode::Char('d')
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !form.config.is_empty() =>
+                    {
+                        let key_to_remove = form
+                            .config
+                            .keys()
+                            .nth(form.config_cursor)
+                            .cloned()
+                            .unwrap_or_default();
+                        form.deleted_keys.push(key_to_remove.clone());
+                        form.config.shift_remove(&key_to_remove);
+                        form.config_cursor =
+                            form.config_cursor.min(form.config.len().saturating_sub(1));
+                        if form.config.is_empty() {
+                            form.focus = UpdateProviderField::ConfigKey;
+                        }
+                    }
+                    _ => {}
+                },
                 UpdateProviderField::ConfigKey => match key.code {
                     KeyCode::Enter => {
                         flush_config_input(
@@ -2853,29 +2944,6 @@ impl App {
                             &mut form.config_key_input,
                             &mut form.config_value_input,
                         );
-                    }
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if !form.config.is_empty() {
-                            let key_to_remove = form
-                                .config
-                                .keys()
-                                .nth(form.config_cursor)
-                                .cloned()
-                                .unwrap_or_default();
-                            form.deleted_keys.push(key_to_remove.clone());
-                            form.config.shift_remove(&key_to_remove);
-                            form.config_cursor =
-                                form.config_cursor.min(form.config.len().saturating_sub(1));
-                        }
-                    }
-                    KeyCode::Up => {
-                        form.config_cursor = form.config_cursor.saturating_sub(1);
-                    }
-                    KeyCode::Down => {
-                        if !form.config.is_empty() {
-                            form.config_cursor =
-                                (form.config_cursor + 1).min(form.config.len() - 1);
-                        }
                     }
                     _ => {
                         Self::handle_text_input(&mut form.config_key_input, key);
@@ -2902,6 +2970,13 @@ impl App {
                             &mut form.config_key_input,
                             &mut form.config_value_input,
                         );
+                        if !form.config_key_input.is_empty() || !form.config_value_input.is_empty()
+                        {
+                            form.status = Some(
+                                "Both key and value are required to add config entry.".to_string(),
+                            );
+                            return;
+                        }
                         if form.new_value.is_empty()
                             && form.config.is_empty()
                             && form.deleted_keys.is_empty()
@@ -3651,5 +3726,55 @@ mod tests {
             !request.contains_key("KEEP"),
             "KEEP unchanged must not be in delta"
         );
+    }
+
+    // -- partial config input on submit --------------------------------
+
+    #[test]
+    fn submit_guard_triggers_when_key_filled_value_empty() {
+        let mut config = IndexMap::new();
+        let mut key_input = "FOO".to_string();
+        let mut val_input = String::new();
+
+        let flushed = flush_config_input(&mut config, &mut key_input, &mut val_input);
+
+        assert!(!flushed, "flush must fail when value is empty");
+        assert!(
+            !key_input.is_empty() || !val_input.is_empty(),
+            "submit guard must detect partial input"
+        );
+        assert!(config.is_empty(), "config must not be modified");
+    }
+
+    #[test]
+    fn submit_guard_triggers_when_value_filled_key_empty() {
+        let mut config = IndexMap::new();
+        let mut key_input = String::new();
+        let mut val_input = "bar".to_string();
+
+        let flushed = flush_config_input(&mut config, &mut key_input, &mut val_input);
+
+        assert!(!flushed, "flush must fail when key is empty");
+        assert!(
+            !key_input.is_empty() || !val_input.is_empty(),
+            "submit guard must detect partial input"
+        );
+        assert!(config.is_empty(), "config must not be modified");
+    }
+
+    #[test]
+    fn submit_guard_clear_when_both_filled() {
+        let mut config = IndexMap::new();
+        let mut key_input = "FOO".to_string();
+        let mut val_input = "bar".to_string();
+
+        let flushed = flush_config_input(&mut config, &mut key_input, &mut val_input);
+
+        assert!(flushed, "flush must succeed when both fields filled");
+        assert!(
+            key_input.is_empty() && val_input.is_empty(),
+            "submit guard must not trigger after successful flush"
+        );
+        assert_eq!(config.get("FOO"), Some(&"bar".to_string()));
     }
 }

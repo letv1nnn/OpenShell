@@ -515,6 +515,7 @@ pub struct UpdateProviderForm {
     pub config_key_input: String,
     pub config_value_input: String,
     pub config_cursor: usize,
+    pub deleted_keys: Vec<String>,
     pub focus: UpdateProviderField,
     pub status: Option<String>,
 }
@@ -2776,6 +2777,7 @@ impl App {
             config_key_input: String::new(),
             config_value_input: String::new(),
             config_cursor: 0,
+            deleted_keys: Vec::new(),
             focus: UpdateProviderField::CredentialValue,
             status: None,
         });
@@ -2851,6 +2853,7 @@ impl App {
                                 .nth(form.config_cursor)
                                 .cloned()
                                 .unwrap_or_default();
+                            form.deleted_keys.push(key_to_remove.clone());
                             form.config.shift_remove(&key_to_remove);
                             form.config_cursor =
                                 form.config_cursor.min(form.config.len().saturating_sub(1));
@@ -2883,7 +2886,10 @@ impl App {
                 },
                 UpdateProviderField::Submit => {
                     if key.code == KeyCode::Enter {
-                        if form.new_value.is_empty() && form.config.is_empty() {
+                        if form.new_value.is_empty()
+                            && form.config.is_empty()
+                            && form.deleted_keys.is_empty()
+                        {
                             form.status =
                                 Some("Credential value or config keys required.".to_string());
                             return;

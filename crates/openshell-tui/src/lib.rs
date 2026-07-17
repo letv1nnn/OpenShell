@@ -1762,9 +1762,12 @@ fn spawn_update_provider(app: &App, tx: mpsc::UnboundedSender<Event>) {
         .filter(|(k, v)| form.original_config.get(*k) != Some(*v))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    form.deleted_keys.iter().for_each(|key| {
-        config.insert(key.clone(), String::new());
-    });
+    form.original_config
+        .keys()
+        .filter(|k| !form.config.contains_key(*k))
+        .for_each(|key| {
+            config.insert(key.clone(), String::new());
+        });
 
     tokio::spawn(async move {
         let mut credentials = HashMap::new();

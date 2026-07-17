@@ -2466,10 +2466,15 @@ impl App {
                                     form.key_field = ProviderKeyField::ConfigKeyName;
                                 } else {
                                     form.key_field = ProviderKeyField::ConfigList;
+                                    form.config_cursor = 0_usize;
                                 }
                             }
                             ProviderKeyField::ConfigList => {
-                                form.key_field = ProviderKeyField::ConfigKeyName;
+                                if form.config_cursor < form.config.len().saturating_sub(1) {
+                                    form.config_cursor += 1;
+                                } else {
+                                    form.key_field = ProviderKeyField::ConfigKeyName;
+                                }
                             }
                             ProviderKeyField::ConfigKeyName => {
                                 form.key_field = ProviderKeyField::ConfigKeyValue;
@@ -2481,6 +2486,7 @@ impl App {
                                     &mut form.config_value_input,
                                 ) {
                                     form.key_field = ProviderKeyField::ConfigKeyName;
+                                    form.config_cursor = form.config.len().saturating_sub(1_usize);
                                 } else if form.config_key_input.is_empty()
                                     && form.config_value_input.is_empty()
                                 {
@@ -2506,10 +2512,11 @@ impl App {
                                         form.key_field = ProviderKeyField::ConfigKeyName;
                                     } else {
                                         form.key_field = ProviderKeyField::ConfigList;
+                                        form.config_cursor = 0_usize;
                                     }
                                 } else {
                                     form.key_field = ProviderKeyField::Credential;
-                                    form.cred_cursor = 0;
+                                    form.cred_cursor = 0_usize;
                                 }
                             }
                             ProviderKeyField::Credential => {
@@ -2517,12 +2524,17 @@ impl App {
                                     form.cred_cursor += 1;
                                 } else if !form.config.is_empty() {
                                     form.key_field = ProviderKeyField::ConfigList;
+                                    form.config_cursor = 0_usize;
                                 } else {
                                     form.key_field = ProviderKeyField::ConfigKeyName;
                                 }
                             }
                             ProviderKeyField::ConfigList => {
-                                form.key_field = ProviderKeyField::ConfigKeyName;
+                                if form.config_cursor < form.config.len().saturating_sub(1) {
+                                    form.config_cursor += 1_usize;
+                                } else {
+                                    form.key_field = ProviderKeyField::ConfigKeyName;
+                                }
                             }
                             ProviderKeyField::ConfigKeyName => {
                                 form.key_field = ProviderKeyField::ConfigKeyValue;
@@ -2534,6 +2546,7 @@ impl App {
                                     &mut form.config_value_input,
                                 ) {
                                     form.key_field = ProviderKeyField::ConfigKeyName;
+                                    form.config_cursor = form.config.len().saturating_sub(1_usize);
                                 } else if form.config_key_input.is_empty()
                                     && form.config_value_input.is_empty()
                                 {
@@ -2554,21 +2567,38 @@ impl App {
                 }
                 KeyCode::BackTab => {
                     if form.is_generic {
-                        form.key_field = match form.key_field {
-                            ProviderKeyField::EnvVarName => ProviderKeyField::Name,
-                            ProviderKeyField::GenericValue => ProviderKeyField::EnvVarName,
-                            ProviderKeyField::ConfigList => ProviderKeyField::GenericValue,
-                            ProviderKeyField::ConfigKeyName => {
-                                if form.config.is_empty() {
-                                    ProviderKeyField::GenericValue
+                        match form.key_field {
+                            ProviderKeyField::EnvVarName => {
+                                form.key_field = ProviderKeyField::Name;
+                            }
+                            ProviderKeyField::GenericValue => {
+                                form.key_field = ProviderKeyField::EnvVarName;
+                            }
+                            ProviderKeyField::ConfigList => {
+                                if form.config_cursor > 0 {
+                                    form.config_cursor -= 1_usize;
                                 } else {
-                                    ProviderKeyField::ConfigList
+                                    form.key_field = ProviderKeyField::GenericValue;
                                 }
                             }
-                            ProviderKeyField::ConfigKeyValue => ProviderKeyField::ConfigKeyName,
-                            ProviderKeyField::Submit => ProviderKeyField::ConfigKeyValue,
-                            _ => ProviderKeyField::Submit,
-                        };
+                            ProviderKeyField::ConfigKeyName => {
+                                if form.config.is_empty() {
+                                    form.key_field = ProviderKeyField::GenericValue;
+                                } else {
+                                    form.config_cursor = form.config.len().saturating_sub(1);
+                                    form.key_field = ProviderKeyField::ConfigList;
+                                }
+                            }
+                            ProviderKeyField::ConfigKeyValue => {
+                                form.key_field = ProviderKeyField::ConfigKeyName;
+                            }
+                            ProviderKeyField::Submit => {
+                                form.key_field = ProviderKeyField::ConfigKeyValue;
+                            }
+                            _ => {
+                                form.key_field = ProviderKeyField::Submit;
+                            }
+                        }
                     } else {
                         match form.key_field {
                             ProviderKeyField::Credential => {
@@ -2579,7 +2609,9 @@ impl App {
                                 }
                             }
                             ProviderKeyField::ConfigList => {
-                                if form.credentials.is_empty() {
+                                if form.config_cursor > 0 {
+                                    form.config_cursor -= 1;
+                                } else if form.credentials.is_empty() {
                                     form.key_field = ProviderKeyField::Name;
                                 } else {
                                     form.key_field = ProviderKeyField::Credential;
@@ -2588,6 +2620,7 @@ impl App {
                             }
                             ProviderKeyField::ConfigKeyName => {
                                 if !form.config.is_empty() {
+                                    form.config_cursor = form.config.len().saturating_sub(1);
                                     form.key_field = ProviderKeyField::ConfigList;
                                 } else if form.credentials.is_empty() {
                                     form.key_field = ProviderKeyField::Name;
@@ -2662,6 +2695,7 @@ impl App {
                                 &mut form.config_value_input,
                             ) {
                                 form.key_field = ProviderKeyField::ConfigKeyName;
+                                form.config_cursor = form.config.len().saturating_sub(1_usize);
                             }
                         }
                         _ => {
@@ -2857,10 +2891,15 @@ impl App {
                         form.focus = UpdateProviderField::ConfigKey;
                     } else {
                         form.focus = UpdateProviderField::ConfigEntry;
+                        form.config_cursor = 0_usize;
                     }
                 }
                 UpdateProviderField::ConfigEntry => {
-                    form.focus = UpdateProviderField::ConfigKey;
+                    if form.config_cursor < form.config.len().saturating_sub(1) {
+                        form.config_cursor += 1_usize;
+                    } else {
+                        form.focus = UpdateProviderField::ConfigKey;
+                    }
                 }
                 UpdateProviderField::ConfigKey => {
                     form.focus = UpdateProviderField::ConfigValue;
@@ -2872,6 +2911,7 @@ impl App {
                         &mut form.config_value_input,
                     ) {
                         form.focus = UpdateProviderField::ConfigKey;
+                        form.config_cursor = form.config.len().saturating_sub(1_usize);
                     } else if form.config_key_input.is_empty() && form.config_value_input.is_empty()
                     {
                         form.focus = UpdateProviderField::Submit;
@@ -2890,13 +2930,18 @@ impl App {
                     form.focus = UpdateProviderField::Submit;
                 }
                 UpdateProviderField::ConfigEntry => {
-                    form.focus = UpdateProviderField::CredentialValue;
+                    if form.config_cursor > 0 {
+                        form.config_cursor -= 1_usize;
+                    } else {
+                        form.focus = UpdateProviderField::CredentialValue;
+                    }
                 }
                 UpdateProviderField::ConfigKey => {
                     if form.config.is_empty() {
                         form.focus = UpdateProviderField::CredentialValue;
                     } else {
                         form.focus = UpdateProviderField::ConfigEntry;
+                        form.config_cursor = form.config.len().saturating_sub(1);
                     }
                 }
                 UpdateProviderField::ConfigValue => {
@@ -2957,6 +3002,7 @@ impl App {
                             &mut form.config_value_input,
                         ) {
                             form.focus = UpdateProviderField::ConfigKey;
+                            form.config_cursor = form.config.len().saturating_sub(1_usize);
                         }
                     }
                     _ => {
@@ -2977,10 +3023,7 @@ impl App {
                             );
                             return;
                         }
-                        if form.new_value.is_empty()
-                            && form.config.is_empty()
-                            && form.deleted_keys.is_empty()
-                        {
+                        if form.new_value.is_empty() && form.config == form.original_config {
                             form.status =
                                 Some("Credential value or config keys required.".to_string());
                             return;

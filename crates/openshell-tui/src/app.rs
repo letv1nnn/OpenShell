@@ -426,12 +426,12 @@ pub struct ProviderDetailView {
 }
 
 #[derive(Clone)]
-pub struct ProviderV2Entry {
+pub struct ProviderListEntry {
     pub provider: openshell_core::proto::Provider,
     pub profile: Option<openshell_core::proto::ProviderProfile>,
 }
 
-impl ProviderV2Entry {
+impl ProviderListEntry {
     pub fn name(&self) -> &str {
         provider_name(&self.provider)
     }
@@ -585,7 +585,7 @@ pub struct App {
 
     // Provider list
     pub providers_v2_enabled: bool,
-    pub provider_entries: Vec<ProviderV2Entry>,
+    pub provider_entries: Vec<ProviderListEntry>,
     pub provider_names: Vec<String>,
     pub provider_types: Vec<String>,
     pub provider_cred_keys: Vec<String>,

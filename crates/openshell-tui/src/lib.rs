@@ -2078,20 +2078,16 @@ async fn refresh_providers(app: &mut App) {
         };
 
     app.provider_count = providers.len();
-    app.provider_entries = if app.providers_v2_enabled {
-        providers
-            .iter()
-            .cloned()
-            .map(|provider| app::ProviderV2Entry {
-                profile: profiles
-                    .get(&(provider.profile_workspace.clone(), provider.r#type.clone()))
-                    .cloned(),
-                provider,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    app.provider_entries = providers
+        .iter()
+        .cloned()
+        .map(|provider| app::ProviderListEntry {
+            profile: profiles
+                .get(&(provider.profile_workspace.clone(), provider.r#type.clone()))
+                .cloned(),
+            provider,
+        })
+        .collect();
     app.provider_names = providers
         .iter()
         .map(|p| app::provider_name(p).to_string())

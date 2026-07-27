@@ -65,6 +65,7 @@ Skills live in `.agents/skills/`. Your agent's harness can discover and load the
 
 | Category        | Skill                     | Purpose                                                                                             |
 | --------------- | ------------------------- | --------------------------------------------------------------------------------------------------- |
+| Getting Started | `openshell-onboarding`    | Structured, exercise-driven onboarding to the OpenShell codebase (architecture, Rust, dev workflow) |
 | Getting Started | `openshell-cli`           | CLI usage, sandbox lifecycle, provider management, BYOC workflows                                   |
 | Getting Started | `debug-openshell-cluster` | Diagnose gateway deployment and health issues                                                       |
 | Getting Started | `debug-inference`         | Diagnose `inference.local`, host-backed local inference, and direct external inference setup issues |

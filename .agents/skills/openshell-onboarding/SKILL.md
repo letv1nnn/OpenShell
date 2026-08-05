@@ -28,7 +28,7 @@ This skill defines **behaviour, sequencing, decision logic, and interaction patt
 
 ### Step 1 — Resolve GitHub username and check Rust experience
 
-Try `gh api user --jq .login` first. If that returns a username, use it without asking. If `gh` is not authenticated or the command fails, ask the user for their GitHub username.
+If the `--github <username>` argument was supplied, use it directly. Otherwise try `gh api user --jq .login`. If that returns a username, use it without asking. If `gh` is not authenticated or the command fails, ask the user for their GitHub username.
 
 Once the username is known, check for real Rust experience (not just forked repos):
 
@@ -37,7 +37,9 @@ Once the username is known, check for real Rust experience (not just forked repo
 gh api "users/{username}/repos?sort=pushed&per_page=100" --jq '[.[] | select(.fork == false) | select(.language == "Rust")] | length'
 
 # 2. Recent Rust commits (last year)
-gh api "search/commits?q=author:{username}+language:rust+committer-date:>$(date -v-1y +%Y-%m-%d)&per_page=5" --jq '.total_count'
+# Portable one-year cutoff: try GNU date, fall back to BSD/macOS date
+CUTOFF=$(date -d '1 year ago' +%Y-%m-%d 2>/dev/null || date -v-1y +%Y-%m-%d)
+gh api "search/commits?q=author:{username}+language:rust+committer-date:>$CUTOFF&per_page=5" --jq '.total_count'
 
 # 3. Rust PRs authored
 gh api "search/issues?q=author:{username}+language:rust+type:pr&per_page=5" --jq '.total_count'
@@ -56,7 +58,7 @@ Do not narrate the search results or analysis. State the result in one line and 
 
 ### Step 2 — Check for existing progress
 
-Look for `onboarding-state.md` in the current directory or repo root.
+Resolve the repository root once (`git rev-parse --show-toplevel`) and look for `<repo-root>/onboarding-state.md`. Use this same canonical path for every read and write — never the current working directory.
 
 If found: load state, show current phase and completed/blocked items, ask to continue or regenerate.
 
@@ -551,7 +553,7 @@ If Jira MCP unavailable: say so, fall back to display-only + file save.
 
 ### Step 5 — Persist progress
 
-Write (or update) `onboarding-state.md` in the repo root.
+Write (or update) `<repo-root>/onboarding-state.md` — the same canonical path resolved in Step 2 (`git rev-parse --show-toplevel`). Never write to the current working directory.
 
 ```markdown
 # OpenShell Onboarding State
@@ -617,7 +619,7 @@ On all other exercises:
 5. Advance to next item
 
 When the user says "continue my onboarding" or "next exercise":
-1. Read `onboarding-state.md`
+1. Read `<repo-root>/onboarding-state.md` (canonical path from Step 2)
 2. Find the first incomplete item
 3. Present it and coach through it
 

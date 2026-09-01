@@ -219,6 +219,7 @@ architecture/plans
 rfc.md
 .worktrees
 .z3-trace
+onboarding-state.md
 
 # RPM build artifacts
 *.src.rpm

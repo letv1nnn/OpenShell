@@ -23,7 +23,7 @@ use tokio::time::sleep;
 
 use self::executor::{CliExecutionError, CliExecutor, ProcessCli};
 
-pub use scenarios::SMOKE_SCENARIO;
+pub use scenarios::{SANDBOX_LIFECYCLE_SCENARIO, SMOKE_SCENARIO};
 
 /// An installed conformance scenario.
 #[derive(Debug)]
@@ -41,7 +41,7 @@ impl Scenario {
     }
 }
 
-const SCENARIOS: &[Scenario] = &[SMOKE_SCENARIO];
+const SCENARIOS: &[Scenario] = &[SMOKE_SCENARIO, SANDBOX_LIFECYCLE_SCENARIO];
 
 /// Returns every scenario compiled into this distribution.
 pub fn scenarios() -> &'static [Scenario] {
@@ -286,6 +286,22 @@ impl OpenShellRunner {
             Arc::new(ProcessCli::new(binary)),
             scenario,
         ))
+    }
+
+    /// Uses the candidate CLI selected by the archive test runner.
+    ///
+    /// Archive-based tests set `OPENSHELL_BIN` to the candidate artifact
+    /// installed in the guest. Requiring it here prevents a test from silently
+    /// resolving a different `openshell` binary from `PATH`.
+    pub fn from_env(scenario: &str) -> Result<Self, RunnerError> {
+        let binary = std::env::var_os("OPENSHELL_BIN")
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                RunnerError::BinaryUnavailable(
+                    "OPENSHELL_BIN must name the candidate openshell CLI".to_string(),
+                )
+            })?;
+        Self::with_binary(binary, scenario)
     }
 
     /// Creates a runner with an injected executor. This is useful for harness tests.

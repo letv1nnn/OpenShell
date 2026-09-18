@@ -18,6 +18,7 @@ pub mod certgen;
 pub mod cli;
 mod compute;
 pub mod config_file;
+mod config_update_operation;
 mod credentials;
 mod defaults;
 mod gateway_listener;
@@ -46,6 +47,7 @@ mod tls;
 pub(crate) mod tls_test_utils;
 pub mod tracing_bus;
 mod tracing_setup;
+mod watch_cursor;
 mod ws_tunnel;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -812,6 +814,12 @@ pub(crate) async fn run_server(
         )));
     }
 
+    // Deadlines must run while restored supervisors wait for policy repair.
+    let (startup_tx, startup_rx) = watch::channel(false);
+    state
+        .compute
+        .spawn_watchers(shutdown_rx.clone(), startup_rx);
+
     // Restored supervisors need the callback listeners while the compute
     // driver reconciles persisted sandboxes. Serve them before starting that
     // reconciliation so policy fetch and supervisor-session registration
@@ -840,7 +848,7 @@ pub(crate) async fn run_server(
         warn!(error = %err, "Failed to start persisted sandboxes during startup");
     }
 
-    state.compute.spawn_watchers(shutdown_rx.clone());
+    startup_tx.send_replace(true);
     ssh_sessions::spawn_session_reaper(store.clone(), Duration::from_hours(1));
     supervisor_session::spawn_relay_reaper(state.clone(), Duration::from_secs(30));
     provider_refresh::spawn_refresh_worker(state.clone(), Duration::from_mins(1));
@@ -1716,12 +1724,15 @@ pub(crate) async fn ensure_default_workspace(store: &Store) -> Result<()> {
         metadata: Some(ObjectMeta {
             id: id.clone(),
             name: DEFAULT_WORKSPACE_NAME.to_string(),
-            created_at_ms: persistence::current_time_ms(),
+            created_time: openshell_core::time::timestamp_from_millis(
+                persistence::current_time_ms(),
+            )
+            .ok(),
             labels: HashMap::new(),
             annotations: HashMap::new(),
             resource_version: 0,
             workspace: String::new(),
-            deletion_timestamp_ms: 0,
+            deletion_time: None,
         }),
         status: Some(openshell_core::proto::datamodel::v1::WorkspaceStatus {
             phase: openshell_core::proto::datamodel::v1::WorkspacePhase::Active.into(),

@@ -14,14 +14,16 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use openshell_core::proto::{
-    GatewayMessage, RelayFrame, RelayInit, RelayOpen, ReportMainProcessExitRequest,
-    ReportMainProcessExitResponse, Sandbox, SandboxPhase, SessionAccepted, SshRelayTarget,
-    SupervisorMessage, gateway_message, relay_open, supervisor_message,
+    GatewayMessage, ProviderReadinessObservation, RelayFrame, RelayInit, RelayOpen,
+    ReportMainProcessExitRequest, ReportMainProcessExitResponse, Sandbox, SandboxPhase,
+    SessionAccepted, SshRelayTarget, SupervisorMessage, gateway_message, relay_open,
+    supervisor_message,
 };
 use openshell_core::transport_errors::is_expected_transport_close_status;
 
 use crate::ServerState;
 use crate::auth::principal::Principal;
+use crate::grpc::provider_readiness::ProviderReadinessEvidence;
 use crate::persistence::ObjectId;
 
 const HEARTBEAT_INTERVAL_SECS: u32 = 15;
@@ -71,6 +73,9 @@ struct LiveSession {
     /// gateway restart invalidates every session and startup reconciliation
     /// resets any persisted endpoint result before requests are served.
     endpoint_report_cursor: Option<EndpointReportCursor>,
+    /// Installation evidence belongs to this connection and is never restored
+    /// from persistence or inherited by a replacement supervisor session.
+    provider_readiness: Option<ProviderReadinessEvidence>,
     #[allow(dead_code)]
     connected_at: Instant,
 }
@@ -155,6 +160,7 @@ impl SupervisorSessionRegistry {
                 terminal_delivery_finalized: false,
                 endpoint_status_initialized: false,
                 endpoint_report_cursor: None,
+                provider_readiness: None,
                 connected_at: Instant::now(),
             },
         );
@@ -267,6 +273,79 @@ impl SupervisorSessionRegistry {
             .is_some_and(|session| session.session_id == session_id)
     }
 
+    /// Bind the authenticated hello's installation capability to its session.
+    /// Initialization is single-use and cannot erase accepted observations.
+    pub(crate) fn initialize_provider_readiness(
+        &self,
+        sandbox_id: &str,
+        session_id: &str,
+        evidence: ProviderReadinessEvidence,
+    ) -> Result<(), Status> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Status::unavailable("supervisor session state is unavailable"))?;
+        let session = sessions
+            .get_mut(sandbox_id)
+            .filter(|session| session.session_id == session_id)
+            .ok_or_else(|| Status::failed_precondition("supervisor session was replaced"))?;
+        if session.provider_readiness.is_some() {
+            return Err(Status::failed_precondition(
+                "provider readiness is already initialized",
+            ));
+        }
+        session.provider_readiness = Some(evidence);
+        Ok(())
+    }
+
+    /// Accept installation evidence only while its session owns this sandbox.
+    /// Session comparison and publication share one lock so reconnects cannot
+    /// transfer a predecessor's evidence into the replacement session.
+    pub(crate) fn accept_provider_readiness(
+        &self,
+        sandbox_id: &str,
+        active_instance_id: &str,
+        observation: ProviderReadinessObservation,
+    ) -> Result<(), Status> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Status::unavailable("supervisor session state is unavailable"))?;
+        let evidence = sessions
+            .get_mut(sandbox_id)
+            .filter(|session| {
+                session.session_id == observation.session_id && session.endpoint_status_initialized
+            })
+            .and_then(|session| session.provider_readiness.as_mut())
+            .ok_or_else(|| {
+                Status::permission_denied(
+                    "provider readiness requires the active supervisor session",
+                )
+            })?;
+        if !evidence.belongs_to_instance(active_instance_id) {
+            return Err(Status::failed_precondition(
+                "provider readiness requires the current sandbox instance",
+            ));
+        }
+        evidence.accept(observation)
+    }
+
+    /// Snapshot installation evidence from the current initialized session.
+    /// Disconnect and replacement discard the previous connection's state.
+    pub(crate) fn provider_readiness(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<Option<ProviderReadinessEvidence>, Status> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| Status::unavailable("supervisor session state is unavailable"))?;
+        Ok(sessions
+            .get(sandbox_id)
+            .filter(|session| session.endpoint_status_initialized)
+            .and_then(|session| session.provider_readiness.clone()))
+    }
+
     /// Mark the current session as the observation authority after its
     /// public endpoint results have been durably reset.
     pub(crate) fn initialize_endpoint_status_authority(
@@ -317,7 +396,7 @@ impl SupervisorSessionRegistry {
         // configured address so a caller can still identify each endpoint.
         for endpoint in &mut status.endpoint_statuses {
             endpoint.last_result = openshell_core::proto::EndpointResult::NoObservedExchange as i32;
-            endpoint.last_reported_at.clear();
+            endpoint.last_reported_time = None;
         }
     }
 
@@ -779,7 +858,7 @@ fn sandbox_proto_is_terminating(sandbox: &Sandbox) -> bool {
         || sandbox
             .metadata
             .as_ref()
-            .is_some_and(|metadata| metadata.deletion_timestamp_ms != 0)
+            .is_some_and(|metadata| metadata.deletion_time.is_some())
 }
 
 async fn sandbox_is_terminating_or_gone(state: &Arc<ServerState>, sandbox_id: &str) -> bool {
@@ -870,6 +949,9 @@ pub async fn handle_connect_supervisor(
         crate::auth::guard::ensure_sandbox_principal_scope(principal, &sandbox_id)?;
     }
     require_persisted_sandbox(&state.store, &sandbox_id).await?;
+    // Validate readiness identities before replacing a healthy session. Older
+    // supervisors remain usable but cannot assert provider installation.
+    let provider_readiness = ProviderReadinessEvidence::from_hello(&hello)?;
 
     let session_id = Uuid::new_v4().to_string();
     info!(
@@ -919,12 +1001,25 @@ pub async fn handle_connect_supervisor(
             "supervisor session was replaced during endpoint status initialization",
         ));
     }
+    if let Err(error) = state.supervisor_sessions.initialize_provider_readiness(
+        &sandbox_id,
+        &session_id,
+        provider_readiness,
+    ) {
+        state
+            .supervisor_sessions
+            .remove_if_current(&sandbox_id, &session_id);
+        return Err(error);
+    }
 
     // Step 3: Send SessionAccepted.
     let accepted = GatewayMessage {
         payload: Some(gateway_message::Payload::SessionAccepted(SessionAccepted {
             session_id: session_id.clone(),
-            heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
+            heartbeat_interval: openshell_core::time::duration_from_std(Duration::from_secs(
+                u64::from(HEARTBEAT_INTERVAL_SECS),
+            ))
+            .ok(),
         })),
     };
     if tx.send(accepted).await.is_err() {
@@ -1221,12 +1316,12 @@ mod tests {
             metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
                 id: id.to_string(),
                 name: name.to_string(),
-                created_at_ms: 1_000_000,
+                created_time: openshell_core::time::timestamp_from_millis(1_000_000).ok(),
                 labels: HashMap::new(),
                 resource_version: 0,
                 annotations: HashMap::new(),
                 workspace: "default".to_string(),
-                deletion_timestamp_ms: 0,
+                deletion_time: None,
             }),
             ..Default::default()
         }
@@ -1263,7 +1358,7 @@ mod tests {
             ports: vec![443],
             path: "/mcp".to_string(),
             last_result: EndpointResult::HttpResponseReceived as i32,
-            last_reported_at: "2026-09-05T01:01:00.000Z".to_string(),
+            last_reported_time: Some("2026-09-05T01:01:00.000Z".parse().unwrap()),
         };
         let ready = SandboxCondition {
             r#type: "Ready".to_string(),
@@ -1277,7 +1372,7 @@ mod tests {
         });
         let unknown = EndpointStatus {
             last_result: EndpointResult::NoObservedExchange as i32,
-            last_reported_at: String::new(),
+            last_reported_time: None,
             ..endpoint.clone()
         };
 
@@ -1775,7 +1870,8 @@ mod tests {
     #[test]
     fn sandbox_proto_terminating_detects_deletion_timestamp() {
         let mut sandbox = sandbox_record("sbx-1", "sandbox-one");
-        sandbox.metadata.as_mut().unwrap().deletion_timestamp_ms = 1;
+        sandbox.metadata.as_mut().unwrap().deletion_time =
+            openshell_core::time::timestamp_from_millis(1).ok();
 
         assert!(sandbox_proto_is_terminating(&sandbox));
     }

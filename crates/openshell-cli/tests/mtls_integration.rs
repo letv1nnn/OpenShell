@@ -161,7 +161,10 @@ impl OpenShell for TestOpenShell {
         _request: tonic::Request<openshell_core::proto::DeleteSandboxRequest>,
     ) -> Result<Response<openshell_core::proto::DeleteSandboxResponse>, Status> {
         Ok(Response::new(
-            openshell_core::proto::DeleteSandboxResponse { deleted: true },
+            openshell_core::proto::DeleteSandboxResponse {
+                sandbox_id: String::new(),
+                outcome: openshell_core::proto::DeletionOutcome::Completed.into(),
+            },
         ))
     }
 
@@ -180,6 +183,24 @@ impl OpenShell for TestOpenShell {
     ) -> Result<Response<openshell_core::proto::GetGatewayConfigResponse>, Status> {
         Ok(Response::new(
             openshell_core::proto::GetGatewayConfigResponse::default(),
+        ))
+    }
+
+    async fn get_sandbox_provider_status(
+        &self,
+        _request: tonic::Request<openshell_core::proto::GetSandboxProviderStatusRequest>,
+    ) -> Result<Response<openshell_core::proto::GetSandboxProviderStatusResponse>, Status> {
+        Err(Status::unimplemented(
+            "provider readiness is not exercised by this mock",
+        ))
+    }
+
+    async fn report_provider_readiness(
+        &self,
+        _request: tonic::Request<openshell_core::proto::ReportProviderReadinessRequest>,
+    ) -> Result<Response<openshell_core::proto::ReportProviderReadinessResponse>, Status> {
+        Err(Status::unimplemented(
+            "provider installation reports are not exercised by this mock",
         ))
     }
 
@@ -414,6 +435,13 @@ impl OpenShell for TestOpenShell {
         &self,
         _request: tonic::Request<openshell_core::proto::ListSandboxPoliciesRequest>,
     ) -> Result<Response<openshell_core::proto::ListSandboxPoliciesResponse>, Status> {
+        Err(Status::unimplemented("not implemented in test"))
+    }
+
+    async fn report_sandbox_configuration(
+        &self,
+        _request: tonic::Request<openshell_core::proto::ReportSandboxConfigurationRequest>,
+    ) -> Result<Response<openshell_core::proto::ReportSandboxConfigurationResponse>, Status> {
         Err(Status::unimplemented("not implemented in test"))
     }
 

@@ -56,11 +56,11 @@ use openshell_core::proto::{
     ListSandboxPoliciesRequest, ListSandboxTemplatesRequest, ListSandboxesRequest,
     ListServicesRequest, PolicySource, PolicyStatus, RejectDraftChunkRequest, ResourceRequirements,
     RevokeSshSessionRequest, Sandbox, SandboxCondition, SandboxPhase, SandboxPolicy,
-    SandboxResources, SandboxServiceExposure, SandboxServiceLevel, SandboxSpec, SandboxStartup,
-    SandboxTemplate, SandboxWorkloadConfig, SandboxWorkloadTemplate, SandboxWorkloadTemplateSpec,
-    ServiceEndpointResponse, SettingScope, StartSandboxRequest, StopSandboxRequest,
-    TcpForwardFrame, TcpForwardInit, TcpRelayTarget, UpdateConfigRequest, WatchSandboxRequest,
-    exec_sandbox_event, tcp_forward_init,
+    SandboxResources, SandboxRestartPolicy, SandboxServiceExposure, SandboxServiceLevel,
+    SandboxSpec, SandboxStartup, SandboxTemplate, SandboxWorkloadConfig, SandboxWorkloadTemplate,
+    SandboxWorkloadTemplateSpec, ServiceAuthorizationMode, ServiceEndpointResponse, SettingScope,
+    StartSandboxRequest, StopSandboxRequest, TcpForwardFrame, TcpForwardInit, TcpRelayTarget,
+    UpdateConfigRequest, WatchSandboxRequest, exec_sandbox_event, tcp_forward_init,
 };
 use openshell_core::settings;
 use openshell_core::{ObjectId, ObjectName, ObjectWorkspace};
@@ -443,6 +443,7 @@ pub struct SandboxCreateConfig<'a> {
     pub policy: Option<&'a str>,
     pub forward: Option<ForwardSpec>,
     pub expose: Option<u16>,
+    pub expose_authorization_mode: ServiceAuthorizationMode,
     pub command: &'a [String],
     pub tty_override: Option<bool>,
     pub auto_providers_override: Option<bool>,
@@ -452,6 +453,7 @@ pub struct SandboxCreateConfig<'a> {
     pub output: &'a str,
     pub detach: bool,
     pub suppress_credential_warnings: bool,
+    pub restart_policy: &'a str,
 }
 
 impl Default for SandboxCreateConfig<'_> {
@@ -471,6 +473,7 @@ impl Default for SandboxCreateConfig<'_> {
             policy: None,
             forward: None,
             expose: None,
+            expose_authorization_mode: ServiceAuthorizationMode::Strip,
             command: &[],
             tty_override: None,
             auto_providers_override: None,
@@ -480,6 +483,7 @@ impl Default for SandboxCreateConfig<'_> {
             output: "table",
             detach: false,
             suppress_credential_warnings: false,
+            restart_policy: "never",
         }
     }
 }
@@ -507,6 +511,7 @@ pub async fn sandbox_create(
         policy,
         forward,
         expose,
+        expose_authorization_mode,
         command,
         tty_override,
         auto_providers_override,
@@ -516,6 +521,7 @@ pub async fn sandbox_create(
         output,
         detach,
         suppress_credential_warnings,
+        restart_policy,
     } = config;
 
     if editor.is_some() && !command.is_empty() {
@@ -670,6 +676,12 @@ pub async fn sandbox_create(
             template: inline_template,
             command: main_command,
             tty: main_terminal,
+            restart_policy: match restart_policy {
+                "never" => SandboxRestartPolicy::Never as i32,
+                "on-failure" => SandboxRestartPolicy::OnFailure as i32,
+                "always" => SandboxRestartPolicy::Always as i32,
+                value => return Err(miette::miette!("invalid restart policy '{value}'")),
+            },
             ..SandboxSpec::default()
         }),
         name: name.unwrap_or_default().to_string(),
@@ -684,6 +696,7 @@ pub async fn sandbox_create(
             .map(|target_port| SandboxServiceExposure {
                 service: String::new(),
                 target_port: u32::from(target_port),
+                authorization_mode: expose_authorization_mode as i32,
             })
             .into_iter()
             .collect(),
@@ -1697,6 +1710,41 @@ where
         "Resource version:".dimmed(),
         sandbox.metadata.as_ref().map_or(0, |m| m.resource_version)
     );
+    println!(
+        "  {} {}",
+        "Restart policy:".dimmed(),
+        sandbox
+            .spec
+            .as_ref()
+            .map_or("never", |spec| { restart_policy_name(spec.restart_policy) })
+    );
+    if let Some(status) = sandbox.status.as_ref() {
+        println!(
+            "  {} {}",
+            "Main process instance:".dimmed(),
+            if status.main_process_instance_id.is_empty() {
+                "-"
+            } else {
+                &status.main_process_instance_id
+            }
+        );
+        println!(
+            "  {} {}",
+            "Last exit code:".dimmed(),
+            status
+                .exit_code
+                .map_or_else(|| "-".to_string(), |code| code.to_string())
+        );
+        println!("  {} {}", "Restart count:".dimmed(), status.restart_count);
+        println!(
+            "  {} {}",
+            "Next restart:".dimmed(),
+            status.next_restart_time.as_ref().map_or_else(
+                || "-".to_string(),
+                |time| format_epoch_ms(proto_timestamp_ms(Some(time))),
+            )
+        );
+    }
 
     // Display labels if present
     if let Some(metadata) = &sandbox.metadata
@@ -2846,6 +2894,14 @@ fn endpoint_status_display_lines(endpoint: &EndpointStatus) -> Vec<String> {
     ]
 }
 
+fn restart_policy_name(policy: i32) -> &'static str {
+    match SandboxRestartPolicy::try_from(policy) {
+        Ok(SandboxRestartPolicy::OnFailure) => "on-failure",
+        Ok(SandboxRestartPolicy::Always) => "always",
+        Ok(SandboxRestartPolicy::Unspecified | SandboxRestartPolicy::Never) | Err(_) => "never",
+    }
+}
+
 fn sandbox_detail_to_json(
     sandbox: &Sandbox,
     config: &GetSandboxConfigResponse,
@@ -2854,6 +2910,33 @@ fn sandbox_detail_to_json(
     let obj = value
         .as_object_mut()
         .expect("sandbox_to_json returns object");
+
+    let restart_policy = sandbox
+        .spec
+        .as_ref()
+        .map_or("never", |spec| restart_policy_name(spec.restart_policy));
+    obj.insert("restart_policy".into(), serde_json::json!(restart_policy));
+    if let Some(status) = sandbox.status.as_ref() {
+        obj.insert(
+            "main_process_instance_id".into(),
+            serde_json::json!(status.main_process_instance_id),
+        );
+        obj.insert("exit_code".into(), serde_json::json!(status.exit_code));
+        obj.insert(
+            "restart_count".into(),
+            serde_json::json!(status.restart_count),
+        );
+        obj.insert(
+            "next_restart_at_ms".into(),
+            serde_json::json!(proto_timestamp_ms(status.next_restart_time.as_ref())),
+        );
+        obj.insert(
+            "main_process_started_at_ms".into(),
+            serde_json::json!(proto_timestamp_ms(
+                status.main_process_started_time.as_ref()
+            )),
+        );
+    }
 
     let policy_source = if config.policy_source == PolicySource::Global as i32 {
         "global"
@@ -3744,11 +3827,20 @@ pub async fn service_expose(
     sandbox: &str,
     service: &str,
     target_port: u16,
+    authorization_mode: ServiceAuthorizationMode,
     workspace: &str,
     tls: &TlsOptions,
 ) -> Result<()> {
-    let response =
-        expose_service_endpoint(server, sandbox, service, target_port, workspace, tls).await?;
+    let response = expose_service_endpoint(
+        server,
+        sandbox,
+        service,
+        target_port,
+        authorization_mode,
+        workspace,
+        tls,
+    )
+    .await?;
 
     if service.is_empty() {
         println!(
@@ -3778,6 +3870,7 @@ async fn expose_service_endpoint(
     sandbox: &str,
     service: &str,
     target_port: u16,
+    authorization_mode: ServiceAuthorizationMode,
     workspace: &str,
     tls: &TlsOptions,
 ) -> Result<ServiceEndpointResponse> {
@@ -3789,6 +3882,7 @@ async fn expose_service_endpoint(
             name: service.to_string(),
             target_port: u32::from(target_port),
             domain: true,
+            authorization_mode: authorization_mode as i32,
             workspace_scope: Some(openshell_core::proto::workspace_selector(
                 workspace.to_string(),
             )),
@@ -3961,6 +4055,7 @@ fn print_service_endpoint_table(
                 .map_or("", |m| m.workspace.as_str());
             let service = service_display_name(&endpoint.name).to_string();
             let target = format!("127.0.0.1:{}", endpoint.target_port);
+            let authorization = service_authorization_mode_name(endpoint.authorization_mode);
             let url = if response.url.is_empty() {
                 String::new()
             } else {
@@ -3971,6 +4066,7 @@ fn print_service_endpoint_table(
                 endpoint.sandbox.clone(),
                 service,
                 target,
+                authorization,
                 url,
             ))
         })
@@ -3982,7 +4078,7 @@ fn print_service_endpoint_table(
 
     let ws_width = if all_workspaces {
         rows.iter()
-            .map(|(ws, _, _, _, _)| ws.len())
+            .map(|(ws, _, _, _, _, _)| ws.len())
             .max()
             .unwrap_or(9)
             .max(9)
@@ -3991,50 +4087,52 @@ fn print_service_endpoint_table(
     };
     let sandbox_width = rows
         .iter()
-        .map(|(_, sandbox, _, _, _)| sandbox.len())
+        .map(|(_, sandbox, _, _, _, _)| sandbox.len())
         .max()
         .unwrap_or(7)
         .max(7);
     let service_width = rows
         .iter()
-        .map(|(_, _, service, _, _)| service.len())
+        .map(|(_, _, service, _, _, _)| service.len())
         .max()
         .unwrap_or(7)
         .max(7);
     let target_width = rows
         .iter()
-        .map(|(_, _, _, target, _)| target.len())
+        .map(|(_, _, _, target, _, _)| target.len())
         .max()
         .unwrap_or(6)
         .max(6);
 
     if all_workspaces {
         println!(
-            "{:<ws_width$}  {:<sandbox_width$}  {:<service_width$}  {:<target_width$}  {}",
+            "{:<ws_width$}  {:<sandbox_width$}  {:<service_width$}  {:<target_width$}  {:<20}  {}",
             "WORKSPACE".bold(),
             "SANDBOX".bold(),
             "SERVICE".bold(),
             "TARGET".bold(),
+            "AUTHORIZATION".bold(),
             "URL".bold(),
         );
     } else {
         println!(
-            "{:<sandbox_width$}  {:<service_width$}  {:<target_width$}  {}",
+            "{:<sandbox_width$}  {:<service_width$}  {:<target_width$}  {:<20}  {}",
             "SANDBOX".bold(),
             "SERVICE".bold(),
             "TARGET".bold(),
+            "AUTHORIZATION".bold(),
             "URL".bold(),
         );
     }
 
-    for (workspace, sandbox, service, target, url) in rows {
+    for (workspace, sandbox, service, target, authorization, url) in rows {
         if all_workspaces {
             println!(
-                "{workspace:<ws_width$}  {sandbox:<sandbox_width$}  {service:<service_width$}  {target:<target_width$}  {url}"
+                "{workspace:<ws_width$}  {sandbox:<sandbox_width$}  {service:<service_width$}  {target:<target_width$}  {authorization:<20}  {url}"
             );
         } else {
             println!(
-                "{sandbox:<sandbox_width$}  {service:<service_width$}  {target:<target_width$}  {url}"
+                "{sandbox:<sandbox_width$}  {service:<service_width$}  {target:<target_width$}  {authorization:<20}  {url}"
             );
         }
     }
@@ -4060,12 +4158,20 @@ fn service_endpoint_to_json(
         "sandbox": endpoint.sandbox,
         "service": endpoint.name,
         "target_port": endpoint.target_port,
+        "authorization_mode": service_authorization_mode_name(endpoint.authorization_mode),
         "url": url,
     }))
 }
 
 fn service_display_name(service: &str) -> &str {
     if service.is_empty() { "-" } else { service }
+}
+
+fn service_authorization_mode_name(mode: i32) -> &'static str {
+    match ServiceAuthorizationMode::try_from(mode).unwrap_or(ServiceAuthorizationMode::Strip) {
+        ServiceAuthorizationMode::BearerPassthrough => "bearer_passthrough",
+        ServiceAuthorizationMode::Unspecified | ServiceAuthorizationMode::Strip => "strip",
+    }
 }
 
 /// Read gcloud Application Default Credentials from disk.
@@ -5861,7 +5967,7 @@ fn print_policy_revision_table(revisions: &[openshell_core::proto::SandboxPolicy
             &rev.policy_hash
         };
         let error_short = if rev.load_error.len() > 40 {
-            format!("{}...", &rev.load_error[..40])
+            truncate_status_field(&rev.load_error, 40)
         } else {
             rev.load_error.clone()
         };
@@ -6440,10 +6546,11 @@ mod tests {
     use openshell_core::proto::{
         EndpointResult, EndpointStatus, GetSandboxConfigResponse, GpuResourceRequirements,
         PolicySource, PolicyStatus, ResourceRequirements, Sandbox, SandboxCondition, SandboxPhase,
-        SandboxPolicy, SandboxPolicyRevision, SandboxResources, SandboxStatus,
-        SandboxWorkloadConfig, SandboxWorkloadTemplate, SandboxWorkloadTemplateProvenance,
-        SandboxWorkloadTemplateSpec, ServiceEndpoint, ServiceEndpointResponse, WorkspaceMember,
-        WorkspaceRole, datamodel::v1::ObjectMeta,
+        SandboxPolicy, SandboxPolicyRevision, SandboxResources, SandboxRestartPolicy, SandboxSpec,
+        SandboxStatus, SandboxWorkloadConfig, SandboxWorkloadTemplate,
+        SandboxWorkloadTemplateProvenance, SandboxWorkloadTemplateSpec, ServiceAuthorizationMode,
+        ServiceEndpoint, ServiceEndpointResponse, WorkspaceMember, WorkspaceRole,
+        datamodel::v1::ObjectMeta,
     };
 
     #[test]
@@ -6527,6 +6634,29 @@ mod tests {
     }
 
     #[test]
+    fn policy_revision_table_handles_unicode_load_errors() {
+        // Stored diagnostics can contain Unicode paths. Byte 40 splits the
+        // character in the 40-scalar case; longer errors must also remain safe.
+        let revisions = [
+            String::new(),
+            "a".repeat(40),
+            "a".repeat(41),
+            format!("{}é", "a".repeat(39)),
+            format!("{}éz", "a".repeat(39)),
+        ]
+        .into_iter()
+        .map(|load_error| SandboxPolicyRevision {
+            version: 1,
+            status: PolicyStatus::Failed as i32,
+            load_error,
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+
+        super::print_policy_revision_table(&revisions);
+    }
+
+    #[test]
     fn service_endpoint_json_has_raw_fields_and_normalized_url() {
         let response = ServiceEndpointResponse {
             endpoint: Some(ServiceEndpoint {
@@ -6537,6 +6667,7 @@ mod tests {
                 sandbox: "api".to_string(),
                 name: String::new(),
                 target_port: 8080,
+                authorization_mode: ServiceAuthorizationMode::BearerPassthrough as i32,
                 ..Default::default()
             }),
             url: "https://api.openshell.localhost:3000/".to_string(),
@@ -6551,6 +6682,7 @@ mod tests {
                 "sandbox": "api",
                 "service": "",
                 "target_port": 8080,
+                "authorization_mode": "bearer_passthrough",
                 "url": "https://api.openshell.localhost:17670/",
             })
         );
@@ -7717,6 +7849,22 @@ mod tests {
         };
         sandbox.set_phase(SandboxPhase::Ready as i32);
         sandbox.set_current_policy_version(2);
+        sandbox.spec = Some(SandboxSpec {
+            restart_policy: SandboxRestartPolicy::OnFailure as i32,
+            ..Default::default()
+        });
+        sandbox.status = Some(SandboxStatus {
+            phase: SandboxPhase::Starting as i32,
+            main_process_instance_id: "main-2".to_string(),
+            exit_code: Some(9),
+            restart_count: 2,
+            next_restart_time: openshell_core::time::timestamp_from_millis(1_700_000_000_000).ok(),
+            main_process_started_time: openshell_core::time::timestamp_from_millis(
+                1_699_999_000_000,
+            )
+            .ok(),
+            ..Default::default()
+        });
 
         let config = GetSandboxConfigResponse {
             policy_source: PolicySource::Global as i32,
@@ -7728,7 +7876,13 @@ mod tests {
 
         assert_eq!(json["id"], "sb-123");
         assert_eq!(json["name"], "test-sb");
-        assert_eq!(json["phase"], "Ready");
+        assert_eq!(json["phase"], "Starting");
+        assert_eq!(json["restart_policy"], "on-failure");
+        assert_eq!(json["main_process_instance_id"], "main-2");
+        assert_eq!(json["exit_code"], 9);
+        assert_eq!(json["restart_count"], 2);
+        assert_eq!(json["next_restart_at_ms"], 1_700_000_000_000_i64);
+        assert_eq!(json["main_process_started_at_ms"], 1_699_999_000_000_i64);
         assert_eq!(json["policy_source"], "global");
         assert_eq!(json["revision"], 3);
         assert!(json["policy"].is_null());

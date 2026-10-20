@@ -3,6 +3,9 @@
 
 //! Backend-owned launch decoding and client construction for supervisor startup.
 
+mod registration;
+pub use registration::{BackendRegistration, BackendRegistrations, RegisteredBackendSetup};
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -12,9 +15,9 @@ use openshell_core::jwt::{SessionBearerTokenSlot, SupervisorAuthBundle};
 use openshell_core::provider_credentials::ProviderCredentialState;
 use openshell_isolation_interface::AgentSpec;
 use openshell_isolation_interface::contract::{
-    BackendDescriptor, BackendError, BackendRegistry, BoundBoundary, IsolationBackend,
-    ResolvedWorkloadIdentity, SandboxContext, SandboxPolicy,
+    BackendDescriptor, BackendError, ResolvedWorkloadIdentity, SandboxContext, SandboxPolicy,
 };
+use openshell_sandbox_backend::BoundBoundary;
 
 /// Coordinates decoded by the selected trusted backend. Shared startup checks
 /// these against admission before credentials or discovery reach that backend.
@@ -27,13 +30,22 @@ pub struct LaunchIdentity {
     pub vm_policy_identity: Option<super::VmPolicyIdentity>,
 }
 
-/// Runtime state remains owned by the supervisor. Backends retain these same
-/// handles so CA publication, provider reload, and bearer rotation stay visible
+/// Runtime state remains owned by the supervisor.
+///
+/// Backends retain these same handles so CA publication, provider reload, and bearer rotation stay visible
 /// after attachment; copying their current contents would lose later updates.
 pub struct BackendServices {
     pub ca_file_paths: Arc<Mutex<Option<(PathBuf, PathBuf)>>>,
     pub provider_credentials: ProviderCredentialState,
     pub sandbox_bearer: SessionBearerTokenSlot,
+}
+
+/// Startup result; native payload decoding never reaches shared runtime
+/// descriptors or the public isolation interface.
+pub struct BuiltBackend {
+    pub backend: Arc<openshell_sandbox_backend::OpenShellRuntimeBackend>,
+    pub payload: Vec<u8>,
+    pub proxy_listener: Option<openshell_supervisor_network::run::ProxyListenerConfig>,
 }
 
 /// Selected by trusted composition, never by payload contents. Decoding and
@@ -66,7 +78,7 @@ pub trait PreparedBackend: Send + Sync {
     fn build(
         self: Box<Self>,
         services: BackendServices,
-    ) -> std::result::Result<Arc<dyn IsolationBackend>, BackendError>;
+    ) -> std::result::Result<BuiltBackend, BackendError>;
 }
 
 /// Created only after name and launch identity checks. Consuming attachment
@@ -151,28 +163,30 @@ impl SelectedBackend {
     }
 
     /// Construct and attach the selected client using the admitted policy and
-    /// shared services. Registry verification rejects a differently named client.
+    /// shared services. Client validation rejects a differently named endpoint selection.
     pub async fn attach(
-        self,
+        mut self,
         services: BackendServices,
         policy: SandboxPolicy,
         agent: AgentSpec,
-    ) -> Result<Box<dyn BoundBoundary>> {
-        let backend = self
+    ) -> Result<(
+        Box<BoundBoundary>,
+        Option<openshell_supervisor_network::run::ProxyListenerConfig>,
+    )> {
+        let built = self
             .prepared
             .build(services)
             .map_err(|error| miette::miette!(error.to_string()))?;
-        let mut registry = BackendRegistry::new();
-        registry
-            .register(backend)
-            .map_err(|error| miette::miette!(error.to_string()))?;
-        let admitted_backend = self.descriptor.backend_name.clone();
-        let (backend, verified) = registry
-            .resolve(self.descriptor, &admitted_backend)
-            .map_err(|error| miette::miette!(error.to_string()))?;
-        backend
+        self.descriptor.payload = built.payload;
+        if built.backend.backend_name() != self.descriptor.backend_name {
+            return Err(miette::miette!(
+                "RPC client backend does not match admitted backend"
+            ));
+        }
+        let backend = built.backend;
+        let bound = backend
             .attach(
-                verified,
+                self.descriptor,
                 SandboxContext {
                     sandbox_id: self.identity.sandbox_id,
                     session_id: self.identity.session_id,
@@ -182,7 +196,8 @@ impl SelectedBackend {
                 },
             )
             .await
-            .map_err(|error| miette::miette!(error.to_string()))
+            .map_err(|error| miette::miette!(error.to_string()))?;
+        Ok((bound, built.proxy_listener))
     }
 }
 
@@ -235,14 +250,17 @@ impl PreparedBackend for OpenShellLaunch {
     fn build(
         self: Box<Self>,
         services: BackendServices,
-    ) -> std::result::Result<Arc<dyn IsolationBackend>, BackendError> {
-        Ok(Arc::new(
-            openshell_sandbox_backend::OpenShellRuntimeBackend::new(
+    ) -> std::result::Result<BuiltBackend, BackendError> {
+        let payload = self.0.backend_descriptor()?.payload;
+        Ok(BuiltBackend {
+            payload,
+            proxy_listener: None,
+            backend: Arc::new(openshell_sandbox_backend::OpenShellRuntimeBackend::new(
                 services.ca_file_paths,
                 services.provider_credentials,
                 services.sandbox_bearer,
-            ),
-        ))
+            )),
+        })
     }
 }
 
